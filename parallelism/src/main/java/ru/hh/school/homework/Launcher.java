@@ -4,7 +4,6 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.slf4j.Logger;
-import ru.hh.school.async.CF4ThenCombine;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -59,7 +58,7 @@ public class Launcher {
     // При желании naiveSearch и naiveCount можно оптимизировать.
     // "C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java"
     // test our naive methods:
-    Path path = Path.of("C:\\");
+    Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\");
     getStatistic(path);
   }
 
