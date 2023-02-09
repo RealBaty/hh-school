@@ -1,11 +1,18 @@
 package ru.hh.school.homework;
 
-import org.openjdk.jmh.infra.Blackhole;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.slf4j.Logger;
+import ru.hh.school.async.CF4ThenCombine;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,12 +24,18 @@ import static java.util.Map.Entry.comparingByValue;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.counting;
 import static java.util.stream.Collectors.groupingBy;
-import static java.util.stream.Collectors.toMap;
+import static org.slf4j.LoggerFactory.getLogger;
 
 public class Launcher {
 
-  private static final ExecutorService mainExecutor = Executors.newFixedThreadPool(6);
-  private static final ExecutorService requestExecutor = Executors.newFixedThreadPool(12);
+  private static final ExecutorService mainExecutor = Executors.newFixedThreadPool(12);
+
+  //Если здесь использовать Executors.newVirtualThreadPerTaskExecutor() можно значительно ускорить время выполнения
+  //Однако гугл за такое не поблагодарит. Так же можно увеличить количество потоков в тред пуле.
+  private static final ExecutorService requestExecutor = Executors.newFixedThreadPool(2);
+  private static final ExecutorService outputExecutor = Executors.newSingleThreadExecutor();
+
+  private static final Logger LOGGER = getLogger(Launcher.class);
 
 
   public static void main(String[] args) throws IOException, InterruptedException {
@@ -44,46 +57,35 @@ public class Launcher {
     //
     // Порядок результатов в консоли не обязательный.
     // При желании naiveSearch и naiveCount можно оптимизировать.
-
+    // "C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java"
     // test our naive methods:
     Path path = Path.of("C:\\");
     getStatistic(path);
-    Thread.sleep(1000);
-    requestExecutor.shutdown();
-    //testCount();
-    //testSearch();
   }
 
-  private static void testCount() {
-    Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java");
-    System.out.println(naiveCount(path));
-  }
-
-  private static Map<String, Long> naiveCount(Path path) {
+  private static Map<String, Long> count(Path path) {
     try (var lines = Files.lines(path)){
       return lines
         .flatMap(line -> Stream.of(line.split("[^a-zA-Z0-9]")))
         .filter(word -> word.length() > 3)
-        .collect(groupingBy(identity(), counting()))
-        .entrySet()
-        .stream()
-        .sorted(comparingByValue(reverseOrder()))
-        .limit(10)
-        .collect(toMap(Map.Entry::getKey, Map.Entry::getValue));
+        .collect(groupingBy(identity(), counting()));
     }
     catch (IOException e) {
-      throw new RuntimeException(e);
+      LOGGER.error("The file <" + path + "> cannot be read");
+      return new HashMap<>();
     }
   }
 
   private static void outputStatistic(Map<String, Long> statistic, Path path){
-    for(var word: statistic.keySet()){
-      /*try {
-        System.out.println("<" + path.toString() + "> - <" + word + "> - <" + naiveSearch(word) + ">");
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }*/
-      Blackhole.consumeCPU(100);
+    List<String> mostPopularWords = statistic.entrySet().stream()
+            .sorted(comparingByValue(reverseOrder()))
+            .limit(10)
+            .map(Map.Entry::getKey)
+            .toList();
+    for(var word: mostPopularWords){
+      CompletableFuture.supplyAsync(() -> search(word), requestExecutor)
+              .thenAcceptAsync(resultCount -> System.out.println("<" + path.toString() + "> - <" + word + "> - <" + resultCount + ">"),
+                       outputExecutor);
     }
   }
 
@@ -93,91 +95,88 @@ public class Launcher {
             .collect(Collectors.toMap(
                     Map.Entry::getKey,
                     Map.Entry::getValue,
-                    Long::sum))
-            .entrySet()
-            .stream()
-            .sorted(comparingByValue(reverseOrder()))
-            .limit(10)
-            .collect(Collectors.toMap(
-                    Map.Entry::getKey,
-                    Map.Entry::getValue,
                     Long::sum));
-  }
-
-  private static CompletableFuture<List<Path>> getChildrenPaths(Path path){
-    CompletableFuture<List<Path>> childrenPaths = new CompletableFuture<>();
-    mainExecutor.execute(() -> {
-      try(var pathStream = Files.list(path)) {
-        childrenPaths.complete(pathStream
-                .toList());
-      } catch (IOException e) {
-        //throw new RuntimeException(e);
-        childrenPaths.complete(new ArrayList<>());
-      }
-    });
-    return childrenPaths;
   }
 
   public static CompletableFuture<Map<String, Long>> getJavaFileStatistic(Path path){
     CompletableFuture<Map<String, Long>> fileStatistic = new CompletableFuture<>();
     if(path.getFileName().toString().matches("[a-zA-Z0-9]+.java")) {
-      mainExecutor.execute(() -> fileStatistic.complete(naiveCount(path)));
+      mainExecutor.execute(() -> fileStatistic.complete(count(path)));
     } else {
       fileStatistic.complete(new HashMap<>());
     }
     return fileStatistic;
   }
 
-  /*private static void getStatistic(Path path, CompletableFuture<Map<String, Long>> statistic){
-    if(!Files.isDirectory(path)){
-      statistic.complete(naiveCount(path));
-    } else {
-
-    }
-  }*/
-
   private static CompletableFuture<Map<String, Long>> getStatistic(Path path) {
     if(!Files.isDirectory(path)){
       return getJavaFileStatistic(path);
     }
-    var res = getChildrenPaths(path)
-            .thenApply(pats -> pats.stream()
-                    .map(Launcher::getStatistic)
-                    .toList())
-            .thenCompose(childrenStatistics -> {
-              CompletableFuture<Map<String, Long>> statistic = CompletableFuture.completedFuture(new HashMap<>());
-              for(var childStatistic: childrenStatistics){
-                statistic = statistic.thenCombineAsync(childStatistic, Launcher::mergeStatistics);
-              }
-              return statistic;
-            });
-    res.thenAcceptAsync(statistic -> Launcher.outputStatistic(statistic, path), requestExecutor);
-    return res;
+    try(var childrenPathsStream = Files.list(path)){
+      List<CompletableFuture<Map<String, Long>>> childrenStatisticsPromise = childrenPathsStream
+              .map(CompletableFuture::completedFuture)
+              .map(pathPromise -> pathPromise.thenComposeAsync(Launcher::getStatistic, mainExecutor))
+              .toList();
+      CompletableFuture<Map<String, Long>> promise = CompletableFuture.completedFuture(new HashMap<>());
+      for(var childStatisticPromise: childrenStatisticsPromise){
+        promise = promise.thenCombineAsync(childStatisticPromise, Launcher::mergeStatistics, mainExecutor);
+      }
+      promise.thenAcceptAsync(statistic -> Launcher.outputStatistic(statistic, path), mainExecutor);
+      return promise;
+    } catch (IOException e){
+      LOGGER.error("The folder <" + path + "> cannot be read");
+      return CompletableFuture.completedFuture(new HashMap<>());
+    }
   }
 
-  private static void testSearch() throws IOException {
-    System.out.println(naiveSearch("public"));
-  }
+  private static long search(String query) {
+    Document document = null;
+    try {
+      document = Jsoup //
+        .connect("https://www.google.com/search?q=" + query) //
+        .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36") //
+        .get();
+    } catch (IOException e) {
+      LOGGER.error("Unable to connect to https://www.google.com/search?q=" + query);
+      return -1;
+    }
 
-  /*private static long naiveSearch(String query) throws IOException {
-    Document document = Jsoup //
-      .connect("https://www.google.com/search?q=" + query) //
-      .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36") //
-      .get();
-
-    Element divResultStats = document.select("div#slim_appbar").first();
+    Element divResultStats = document.select("div#result-stats").first();
+    if(divResultStats == null){
+      LOGGER.error("Invalid page received on https://www.google.com/search?q=" + query);
+      return -1;
+    }
     String text = divResultStats.text();
     String resultsPart = text.substring(0, text.indexOf('('));
     return Long.parseLong(resultsPart.replaceAll("[^0-9]", ""));
-  }*/
-
-  private static long naiveSearch(String query) throws IOException {
-    try {
-      Thread.sleep(100);
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
-    return 228;
   }
+
+//  private static long search(String query) {
+//    try {
+//      Thread.sleep(1000);
+//    } catch (InterruptedException e) {
+//      throw new RuntimeException(e);
+//    }
+//    return new Random().nextInt(1000000000);
+//  }
+
+//  private static Map<String, Long> getStatisticOneThread(Path path) {
+//    if(!Files.isDirectory(path)){
+//      if(path.getFileName().toString().matches("[a-zA-Z0-9]+.java")) {
+//        return count(path);
+//      } else {
+//        return new HashMap<>();
+//      }
+//    }
+//    try(var childrenPathsStream = Files.list(path)) {
+//      Map<String, Long> statistic = new HashMap<>();
+//      for(var childPath: childrenPathsStream.toList()){
+//        statistic = mergeStatistics(statistic, getStatisticClassic(childPath));
+//      }
+//      return statistic;
+//    } catch (IOException e){
+//      return new HashMap<>();
+//    }
+//  }
 
 }
