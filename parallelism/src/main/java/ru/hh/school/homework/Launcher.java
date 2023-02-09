@@ -104,7 +104,7 @@ public class Launcher {
 
   public static CompletableFuture<Map<String, Long>> getJavaFileStatistic(Path path){
     CompletableFuture<Map<String, Long>> fileStatistic = new CompletableFuture<>();
-    if(path.getFileName().toString().matches("[a-zA-Z0-9]+.java")) {
+    if(path.getFileName().toString().matches(".+.java")) {
       mainExecutor.execute(() -> fileStatistic.complete(count(path)));
     } else {
       fileStatistic.complete(new HashMap<>());
