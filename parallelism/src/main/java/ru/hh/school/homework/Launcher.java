@@ -11,7 +11,6 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,9 +28,15 @@ public class Launcher {
 
   private static final ExecutorService mainExecutor = Executors.newFixedThreadPool(12);
 
-  //Если здесь использовать Executors.newVirtualThreadPerTaskExecutor() можно значительно ускорить время выполнения
-  //Однако гугл за такое не поблагодарит. Так же можно увеличить количество потоков в тред пуле.
-  private static final ExecutorService requestExecutor = Executors.newFixedThreadPool(2);
+  // Т. к. узким горлышком являются долгие запросы, то если здесь использовать Executors.newVirtualThreadPerTaskExecutor(), можно значительно
+  // ускорить время выполнения.
+  // Однако гугл за такое не поблагодарит. Также можно увеличить количество потоков в тред пуле. Это значительно увеличит производительность,
+  // и приведет к более быстрому бану.
+  private static final ExecutorService requestExecutor = Executors.newFixedThreadPool(20);
+
+  // При большом количестве потоков в requestExecutor, или при использовании Executors.newVirtualThreadPerTaskExecutor()
+  // выполнение вывода в консоль в отдельном потоке дает значительное увеличение производительности,
+  // так как вывод в консоль - synchronized операция
   private static final ExecutorService outputExecutor = Executors.newSingleThreadExecutor();
 
   private static final Logger LOGGER = getLogger(Launcher.class);
@@ -58,8 +63,8 @@ public class Launcher {
     // При желании naiveSearch и naiveCount можно оптимизировать.
     // "C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java"
     // test our naive methods:
-    Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\");
-    getStatistic(path);
+    Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\parallelism\\");
+    getAndOutputStatistic(path);
   }
 
   private static Map<String, Long> count(Path path) {
@@ -107,14 +112,14 @@ public class Launcher {
     return fileStatistic;
   }
 
-  private static CompletableFuture<Map<String, Long>> getStatistic(Path path) {
+  private static CompletableFuture<Map<String, Long>> getAndOutputStatistic(Path path) {
     if(!Files.isDirectory(path)){
       return getJavaFileStatistic(path);
     }
     try(var childrenPathsStream = Files.list(path)){
       List<CompletableFuture<Map<String, Long>>> childrenStatisticsPromise = childrenPathsStream
               .map(CompletableFuture::completedFuture)
-              .map(pathPromise -> pathPromise.thenComposeAsync(Launcher::getStatistic, mainExecutor))
+              .map(pathPromise -> pathPromise.thenComposeAsync(Launcher::getAndOutputStatistic, mainExecutor))
               .toList();
       CompletableFuture<Map<String, Long>> promise = CompletableFuture.completedFuture(new HashMap<>());
       for(var childStatisticPromise: childrenStatisticsPromise){
@@ -159,7 +164,7 @@ public class Launcher {
 //    return new Random().nextInt(1000000000);
 //  }
 
-//  private static Map<String, Long> getStatisticOneThread(Path path) {
+//  private static Map<String, Long> getStatisticInOneThread(Path path) {
 //    if(!Files.isDirectory(path)){
 //      if(path.getFileName().toString().matches("[a-zA-Z0-9]+.java")) {
 //        return count(path);
