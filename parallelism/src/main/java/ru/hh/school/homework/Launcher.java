@@ -11,9 +11,7 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -38,6 +36,8 @@ public class Launcher {
   // выполнение вывода в консоль в отдельном потоке дает значительное увеличение производительности,
   // так как вывод в консоль - synchronized операция
   private static final ExecutorService outputExecutor = Executors.newSingleThreadExecutor();
+
+  private static final ConcurrentMap<String, Long> searchCache = new ConcurrentHashMap<>();
 
   private static final Logger LOGGER = getLogger(Launcher.class);
 
@@ -125,7 +125,7 @@ public class Launcher {
       for(var childStatisticPromise: childrenStatisticsPromise){
         promise = promise.thenCombineAsync(childStatisticPromise, Launcher::mergeStatistics, mainExecutor);
       }
-      promise.thenAcceptAsync(statistic -> Launcher.outputStatistic(statistic, path), mainExecutor);
+      promise.thenAccept(statistic -> Launcher.outputStatistic(statistic, path));
       return promise;
     } catch (IOException e){
       LOGGER.error("The folder <" + path + "> cannot be read");
@@ -134,7 +134,10 @@ public class Launcher {
   }
 
   private static long search(String query) {
-    Document document = null;
+    if(searchCache.containsKey(query)){
+      return searchCache.get(query);
+    }
+    Document document;
     try {
       document = Jsoup //
         .connect("https://www.google.com/search?q=" + query) //
@@ -142,17 +145,20 @@ public class Launcher {
         .get();
     } catch (IOException e) {
       LOGGER.error("Unable connect to https://www.google.com/search?q=" + query);
-      return -1;
+      searchCache.putIfAbsent(query, -1L);
+      return searchCache.get(query);
     }
 
     Element divResultStats = document.select("div#result-stats").first();
     if(divResultStats == null){
       LOGGER.error("Invalid page received on https://www.google.com/search?q=" + query);
-      return -1;
+      searchCache.putIfAbsent(query, -1L);
+      return searchCache.get(query);
     }
     String text = divResultStats.text();
     String resultsPart = text.substring(0, text.indexOf('('));
-    return Long.parseLong(resultsPart.replaceAll("[^0-9]", ""));
+    searchCache.put(query, Long.parseLong(resultsPart.replaceAll("[^0-9]", "")));
+    return searchCache.get(query);
   }
 
 //  private static long search(String query) {
