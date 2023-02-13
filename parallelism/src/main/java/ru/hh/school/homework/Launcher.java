@@ -1,23 +1,49 @@
 package ru.hh.school.homework;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Map;
-import java.util.stream.Stream;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import static java.util.Collections.reverseOrder;
 import static java.util.Map.Entry.comparingByValue;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.counting;
 import static java.util.stream.Collectors.groupingBy;
-import static java.util.stream.Collectors.toMap;
+import static org.slf4j.LoggerFactory.getLogger;
 
 public class Launcher {
 
-  public static void main(String[] args) throws IOException {
+  private static final ExecutorService mainExecutor = Executors.newFixedThreadPool(12);
+
+  // Т. к. узким горлышком являются долгие запросы, то если здесь использовать Executors.newVirtualThreadPerTaskExecutor(), можно значительно
+  // ускорить время выполнения.
+  // Однако гугл за такое не поблагодарит. Также можно увеличить количество потоков в тред пуле. Это значительно увеличит производительность,
+  // и приведет к более быстрому бану.
+  private static final ExecutorService requestExecutor = Executors.newFixedThreadPool(20);
+
+  // При большом количестве потоков в requestExecutor, или при использовании Executors.newVirtualThreadPerTaskExecutor()
+  // выполнение вывода в консоль в отдельном потоке дает значительное увеличение производительности,
+  // так как вывод в консоль - synchronized операция
+  private static final ExecutorService outputExecutor = Executors.newSingleThreadExecutor();
+
+  private static final ConcurrentMap<String, Long> searchCache = new ConcurrentHashMap<>();
+
+  private static final Logger LOGGER = getLogger(Launcher.class);
+
+
+  public static void main(String[] args) throws IOException, InterruptedException {
     // Написать код, который, как можно более параллельно:
     // - по заданному пути найдет все "*.java" файлы
     // - для каждого файла вычислит 10 самых популярных слов (см. #naiveCount())
@@ -36,48 +62,141 @@ public class Launcher {
     //
     // Порядок результатов в консоли не обязательный.
     // При желании naiveSearch и naiveCount можно оптимизировать.
-
+    // "C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java"
     // test our naive methods:
-    testCount();
-    testSearch();
+    Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\parallelism\\");
+    getAndOutputStatistic(path).join();
+    mainExecutor.shutdown();
+    mainExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
+    requestExecutor.shutdown();
+    requestExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
+    outputExecutor.shutdown();
+    outputExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
   }
 
-  private static void testCount() {
-    Path path = Path.of("d:\\projects\\work\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\parallelism\\Runner.java");
-    System.out.println(naiveCount(path));
-  }
-
-  private static Map<String, Long> naiveCount(Path path) {
-    try {
-      return Files.lines(path)
+  private static Map<String, Long> count(Path path) {
+    try (var lines = Files.lines(path)){
+      return lines
         .flatMap(line -> Stream.of(line.split("[^a-zA-Z0-9]")))
         .filter(word -> word.length() > 3)
-        .collect(groupingBy(identity(), counting()))
-        .entrySet()
-        .stream()
-        .sorted(comparingByValue(reverseOrder()))
-        .limit(10)
-        .collect(toMap(Map.Entry::getKey, Map.Entry::getValue));
+        .collect(groupingBy(identity(), counting()));
     }
     catch (IOException e) {
-      throw new RuntimeException(e);
+      LOGGER.error("The file <" + path + "> cannot be read");
+      return new HashMap<>();
     }
   }
 
-  private static void testSearch() throws IOException {
-    System.out.println(naiveSearch("public"));
+  private static void outputStatistic(Map<String, Long> statistic, Path path){
+    List<String> mostPopularWords = statistic.entrySet().stream()
+            .sorted(comparingByValue(reverseOrder()))
+            .limit(10)
+            .map(Map.Entry::getKey)
+            .toList();
+    for(var word: mostPopularWords){
+      CompletableFuture.supplyAsync(() -> search(word), requestExecutor)
+              .thenAcceptAsync(resultCount -> System.out.println("<" + path.toString() + "> - <" + word + "> - <" + resultCount + ">"),
+                       outputExecutor);
+    }
   }
 
-  private static long naiveSearch(String query) throws IOException {
-    Document document = Jsoup //
-      .connect("https://www.google.com/search?q=" + query) //
-      .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36") //
-      .get();
+  private static Map<String, Long> mergeStatistics(Map<String, Long> statistic1, Map<String, Long> statistic2){
+    return Stream.of(statistic1, statistic2)
+            .flatMap(map -> map.entrySet().stream())
+            .collect(Collectors.toMap(
+                    Map.Entry::getKey,
+                    Map.Entry::getValue,
+                    Long::sum));
+  }
 
-    Element divResultStats = document.select("div#slim_appbar").first();
+  public static CompletableFuture<Map<String, Long>> getJavaFileStatistic(Path path){
+    CompletableFuture<Map<String, Long>> fileStatistic = new CompletableFuture<>();
+    if(path.getFileName().toString().matches(".+.java")) {
+      mainExecutor.execute(() -> fileStatistic.complete(count(path)));
+    } else {
+      fileStatistic.complete(new HashMap<>());
+    }
+    return fileStatistic;
+  }
+
+  private static CompletableFuture<Map<String, Long>> getAndOutputStatistic(Path path) {
+    if(!Files.isDirectory(path)){
+      return getJavaFileStatistic(path);
+    }
+    try(var childrenPathsStream = Files.list(path)){
+      List<CompletableFuture<Map<String, Long>>> childrenStatisticsPromise = childrenPathsStream
+              .map(CompletableFuture::completedFuture)
+              .map(pathPromise -> pathPromise.thenComposeAsync(Launcher::getAndOutputStatistic, mainExecutor))
+              .toList();
+      CompletableFuture<Map<String, Long>> promise = CompletableFuture.completedFuture(new HashMap<>());
+      for(var childStatisticPromise: childrenStatisticsPromise){
+        promise = promise.thenCombineAsync(childStatisticPromise, Launcher::mergeStatistics, mainExecutor);
+      }
+      promise.thenAccept(statistic -> Launcher.outputStatistic(statistic, path));
+      return promise;
+    } catch (IOException e){
+      LOGGER.error("The folder <" + path + "> cannot be read");
+      return CompletableFuture.completedFuture(new HashMap<>());
+    }
+  }
+
+  private static long search(String query) {
+    if(searchCache.containsKey(query)){
+      return searchCache.get(query);
+    }
+    Document document;
+    try {
+      document = Jsoup //
+        .connect("https://www.google.com/search?q=" + query) //
+        .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36") //
+        .get();
+    } catch (IOException e) {
+      LOGGER.error("Unable connect to https://www.google.com/search?q=" + query);
+      searchCache.putIfAbsent(query, -1L);
+      return searchCache.get(query);
+    }
+
+    Element divResultStats = document.select("div#result-stats").first();
+    if(divResultStats == null){
+      LOGGER.error("Invalid page received on https://www.google.com/search?q=" + query);
+      searchCache.putIfAbsent(query, -1L);
+      return searchCache.get(query);
+    }
     String text = divResultStats.text();
     String resultsPart = text.substring(0, text.indexOf('('));
-    return Long.parseLong(resultsPart.replaceAll("[^0-9]", ""));
+    searchCache.put(query, Long.parseLong(resultsPart.replaceAll("[^0-9]", "")));
+    return searchCache.get(query);
   }
+
+//  private static long search(String query) {
+//    if(!searchCache.containsKey(query)) {
+//      try {
+//        Thread.sleep(1000);
+//        searchCache.putIfAbsent(query, new Random().nextLong(1000000000));
+//      } catch (InterruptedException e) {
+//        throw new RuntimeException(e);
+//      }
+//    }
+//    return searchCache.get(query);
+//  }
+
+//  private static Map<String, Long> getStatisticInOneThread(Path path) {
+//    if(!Files.isDirectory(path)){
+//      if(path.getFileName().toString().matches("[a-zA-Z0-9]+.java")) {
+//        return count(path);
+//      } else {
+//        return new HashMap<>();
+//      }
+//    }
+//    try(var childrenPathsStream = Files.list(path)) {
+//      Map<String, Long> statistic = new HashMap<>();
+//      for(var childPath: childrenPathsStream.toList()){
+//        statistic = mergeStatistics(statistic, getStatisticClassic(childPath));
+//      }
+//      return statistic;
+//    } catch (IOException e){
+//      return new HashMap<>();
+//    }
+//  }
 
 }
