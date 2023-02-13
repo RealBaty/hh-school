@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -64,7 +65,13 @@ public class Launcher {
     // "C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\homework\\Launcher.java"
     // test our naive methods:
     Path path = Path.of("C:\\Users\\Dima\\HhSchool\\hh-school\\parallelism\\src\\main\\java\\ru\\hh\\school\\parallelism\\");
-    getAndOutputStatistic(path);
+    getAndOutputStatistic(path).join();
+    mainExecutor.shutdown();
+    mainExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
+    requestExecutor.shutdown();
+    requestExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
+    outputExecutor.shutdown();
+    outputExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
   }
 
   private static Map<String, Long> count(Path path) {
@@ -162,12 +169,15 @@ public class Launcher {
   }
 
 //  private static long search(String query) {
-//    try {
-//      Thread.sleep(1000);
-//    } catch (InterruptedException e) {
-//      throw new RuntimeException(e);
+//    if(!searchCache.containsKey(query)) {
+//      try {
+//        Thread.sleep(1000);
+//        searchCache.putIfAbsent(query, new Random().nextLong(1000000000));
+//      } catch (InterruptedException e) {
+//        throw new RuntimeException(e);
+//      }
 //    }
-//    return new Random().nextInt(1000000000);
+//    return searchCache.get(query);
 //  }
 
 //  private static Map<String, Long> getStatisticInOneThread(Path path) {
